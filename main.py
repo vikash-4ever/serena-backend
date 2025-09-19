@@ -13,6 +13,8 @@ load_dotenv()
 CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
 app = FastAPI()
 
@@ -27,7 +29,6 @@ app.add_middleware(
 # Ensure downloads folder exists
 os.makedirs("downloads", exist_ok=True)
 
-COOKIES_FILE = "cookies.txt"  # <-- path to your exported cookies
 
 class SearchRequest(BaseModel):
     query: str
