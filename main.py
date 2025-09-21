@@ -122,21 +122,29 @@ def search_song(request: SearchRequest):
     """Search songs on YouTube but filter to actual music videos"""
     try:
         query = request.query.strip()
+        is_youtube_link = "youtube.com" in query or "youtu.be" in query
+
         if "spotify.com" in query:
             meta = get_spotify_metadata(query)
             raw_results = youtube_search(meta["query"], limit=15)
         else:
             raw_results = youtube_search(query, limit=15)
 
-        # Filter results to likely music videos
-        filtered_results = [
-            song for song in raw_results
-            if any(k in (song["title"] + " " + song["artist"]).lower() for k in ["music", "song", "audio", "track"])
-        ]
+        # Only filter if it is not a direct YouTube link
+        if not is_youtube_link:
+            filtered_results = [
+                song for song in raw_results
+                if any(k in (song["title"] + " " + song["artist"]).lower()
+                       for k in ["music", "song", "audio", "track"])
+            ]
+        else:
+            filtered_results = raw_results
+
         return {"status": "success", "results": filtered_results[:15]}
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Search failed: {str(e)}")
+
 
 
 @app.get("/popular")
