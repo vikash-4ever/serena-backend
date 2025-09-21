@@ -5,6 +5,7 @@ import yt_dlp
 import requests
 import os
 import random
+import shutil
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware  
 
@@ -15,12 +16,24 @@ CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Try to read cookies path from environment (Render Secret Files sets this)
+# -------------------- COOKIES HANDLING --------------------
 COOKIES_FILE = os.getenv("COOKIES_FILE")
 
-# If not set (local dev), fall back to root folder cookies.txt
-if not COOKIES_FILE:
+if COOKIES_FILE:
+    # On Render, /etc/secrets/cookies.txt is read-only → copy it
+    writable_path = os.path.join(BASE_DIR, "cookies.txt")
+    try:
+        if not os.path.exists(writable_path):
+            shutil.copy(COOKIES_FILE, writable_path)
+        COOKIES_FILE = writable_path
+    except Exception as e:
+        print(f"Warning: failed to copy cookies file: {e}")
+        COOKIES_FILE = None
+else:
+    # Local dev fallback
     COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
+
+# ----------------------------------------------------------
 
 app = FastAPI()
 
