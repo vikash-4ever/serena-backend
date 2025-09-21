@@ -14,7 +14,13 @@ CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
+
+# Try to read cookies path from environment (Render Secret Files sets this)
+COOKIES_FILE = os.getenv("COOKIES_FILE")
+
+# If not set (local dev), fall back to root folder cookies.txt
+if not COOKIES_FILE:
+    COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
 app = FastAPI()
 
