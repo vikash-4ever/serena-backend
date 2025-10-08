@@ -228,11 +228,12 @@ async def download_audio(url: str):
 def stream_audio(link: str):
     try:
         ydl_opts = {
-            "format": "bestaudio/best",
+            "format": "bestaudio[abr<=320]/bestaudio",  # max 320kbps
             "quiet": True,
             "noplaylist": True,
-            "cookiefile": COOKIES_FILE,   # <-- Added cookies support
+            "cookiefile": COOKIES_FILE,  # existing cookies support
         }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(link, download=False)
             audio_url = info["url"]
@@ -241,6 +242,8 @@ def stream_audio(link: str):
             "url": audio_url,
             "title": info.get("title", ""),
             "ext": info.get("ext", ""),
+            "abr": info.get("abr", ""),  # optional: return bitrate for debugging
         }
+
     except Exception as e:
         return {"error": str(e)}
