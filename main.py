@@ -247,3 +247,24 @@ def stream_audio(link: str):
 
     except Exception as e:
         return {"error": str(e)}
+
+# -------------------- PING SERVER KEEP-ALIVE --------------------
+import threading
+import time
+
+# ✅ Load from .env or Render environment variables
+PING_URL = os.getenv("PING_URL", "http://localhost:8000")
+
+def keep_server_awake():
+    """Ping the server every 14 minutes to prevent Render free tier sleep."""
+    while True:
+        try:
+            print("[PING] Sending keep-alive ping...")
+            response = requests.get(f"{PING_URL}/recommendations", timeout=10)
+            print(f"[PING] Status: {response.status_code}")
+        except Exception as e:
+            print(f"[PING] Failed: {e}")
+        time.sleep(14 * 60)  # wait 14 minutes
+
+# Start background thread
+threading.Thread(target=keep_server_awake, daemon=True).start()
