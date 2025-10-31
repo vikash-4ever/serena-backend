@@ -1,5 +1,5 @@
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import yt_dlp
 import requests
@@ -228,25 +228,32 @@ async def download_audio(url: str):
 def stream_audio(link: str):
     try:
         ydl_opts = {
-            "format": "bestaudio[abr<=320]/bestaudio",  # max 320kbps
+            "format": "bestaudio[abr<=320]/bestaudio",
             "quiet": True,
             "noplaylist": True,
-            "cookiefile": COOKIES_FILE,  # existing cookies support
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(link, download=False)
             audio_url = info["url"]
 
-        return {
-            "url": audio_url,
-            "title": info.get("title", ""),
-            "ext": info.get("ext", ""),
-            "abr": info.get("abr", ""),  # optional: return bitrate for debugging
+        # ✅ Stream the audio file directly
+        def iterfile():
+            with requests.get(audio_url, stream=True) as r:
+                r.raise_for_status()
+                for chunk in r.iter_content(chunk_size=8192):
+                    yield chunk
+
+        headers = {
+            "Content-Disposition": f"inline; filename={info.get('title', 'audio')}.mp3",
+            "Access-Control-Allow-Origin": "*",
+            "Content-Type": "audio/mpeg",
         }
 
+        return StreamingResponse(iterfile(), headers=headers)
+
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 # -------------------- PING SERVER KEEP-ALIVE --------------------
 import threading
