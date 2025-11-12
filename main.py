@@ -6,6 +6,7 @@ import requests
 import os
 import random
 import shutil
+import re
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware  
 
@@ -15,6 +16,12 @@ CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.in.projectsegfau.lt",
+    "https://pipedapi.brighteon.wtf"
+]
 
 # -------------------- COOKIES HANDLING --------------------
 COOKIES_FILE = os.getenv("COOKIES_FILE")
@@ -115,6 +122,14 @@ def youtube_search(query: str, limit: int = 10):
         })
     return songs
 
+def extract_video_id(url: str):
+    """Extracts video_id from a YouTube link"""
+    pattern = r"(?:v=|youtu\.be/)([A-Za-z0-9_-]+)"
+    match = re.search(pattern, url)
+    if not match:
+        raise Exception("Invalid YouTube URL")
+    return match.group(1)
+
 # ------------------------- ENDPOINTS -------------------------
 
 @app.post("/search")
@@ -191,69 +206,117 @@ def get_recommendations():
         raise HTTPException(status_code=400, detail=f"Recommendations failed: {str(e)}")
 
 
-@app.get("/download")
-async def download_audio(url: str):
+@app.post("/download")
+def download_audio(request: DownloadRequest):
+    """
+    Download audio using Piped API (for offline playback).
+    Fetches highest bitrate stream and sends as a downloadable file.
+    """
     try:
-        ydl_opts = {
-            "format": "bestaudio[ext=m4a]/bestaudio/best",
-            "quiet": True,
-            "skip_download": True,
-            "cookiefile": COOKIES_FILE,   # <-- Added cookies support
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            formats = info.get("formats", [])
+        url = request.url.strip()
+        video_id = extract_video_id(url)
 
-            # pick m4a if possible
-            audio_url = None
-            ext = "m4a"
-            for f in formats:
-                if f.get("ext") == "m4a":
-                    audio_url = f["url"]
-                    break
-            if not audio_url and formats:
-                audio_url = formats[0]["url"]
-                ext = formats[0]["ext"]
+        # Try multiple Piped instances
+        audio_url = None
+        for instance in PIPED_INSTANCES:
+            try:
+                api_url = f"{instance}/streams/{video_id}"
+                r = requests.get(api_url, timeout=10)
+                if r.status_code != 200:
+                    continue
 
-            return {
-                "url": audio_url,
-                "ext": ext,
-                "title": info.get("title"),
-                "artist": info.get("uploader"),
+                data = r.json()
+                audio_streams = data.get("audioStreams", [])
+                if not audio_streams:
+                    continue
+
+                # Choose the best available audio stream
+                best_stream = sorted(audio_streams, key=lambda x: x.get("bitrate", 0))[-1]
+                audio_url = best_stream["url"]
+                break
+            except:
+                continue
+
+        if not audio_url:
+            raise Exception("No audio streams found for download.")
+
+        # Temporary file save
+        os.makedirs("downloads", exist_ok=True)
+        filename = f"rhymes_{video_id}_{random.randint(1000, 9999)}.webm"
+        filepath = os.path.join("downloads", filename)
+
+        # Stream download & save to temp folder
+        with requests.get(audio_url, stream=True) as r:
+            r.raise_for_status()
+            with open(filepath, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 64):
+                    if chunk:
+                        f.write(chunk)
+
+        # Stream file back to user
+        def iterfile():
+            with open(filepath, "rb") as f:
+                yield from f
+            os.remove(filepath)  # Auto-delete after sending
+
+        return StreamingResponse(
+            iterfile(),
+            media_type="audio/webm",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
             }
+        )
+
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=400, detail=f"Download failed: {str(e)}")
+
 
 @app.get("/stream")
-def stream_audio(link: str):
+def stream_audio(url: str):
+    """
+    Streams audio using Piped API (stable, no YouTube restrictions)
+    """
     try:
-        ydl_opts = {
-            "format": "bestaudio[abr<=320]/bestaudio",
-            "quiet": True,
-            "noplaylist": True,
-        }
+        video_id = extract_video_id(url)
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(link, download=False)
-            audio_url = info["url"]
+        audio_url = None
 
-        # ✅ Stream the audio file directly
+        # Try multiple Piped instances to avoid downtime
+        for instance in PIPED_INSTANCES:
+            try:
+                api_url = f"{instance}/streams/{video_id}"
+                r = requests.get(api_url, timeout=10)
+                
+                if r.status_code != 200:
+                    continue
+                
+                data = r.json()
+                audio_streams = data.get("audioStreams", [])
+
+                if not audio_streams:
+                    continue
+
+                # Choose highest quality audio
+                best_stream = sorted(audio_streams, key=lambda x: x.get("bitrate", 0))[-1]
+                audio_url = best_stream["url"]
+                break
+            except:
+                continue
+
+        if not audio_url:
+            raise Exception("No audio streams available from any Piped instance.")
+
         def iterfile():
             with requests.get(audio_url, stream=True) as r:
                 r.raise_for_status()
-                for chunk in r.iter_content(chunk_size=8192):
+                for chunk in r.iter_content(1024 * 64):
                     yield chunk
 
-        headers = {
-            "Content-Disposition": f"inline; filename={info.get('title', 'audio')}.mp3",
-            "Access-Control-Allow-Origin": "*",
-            "Content-Type": "audio/mpeg",
-        }
-
-        return StreamingResponse(iterfile(), headers=headers)
+        return StreamingResponse(iterfile(), media_type="audio/webm")
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Streaming failed: {str(e)}")
+
 
 # -------------------- PING SERVER KEEP-ALIVE --------------------
 import threading
