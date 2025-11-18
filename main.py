@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 import yt_dlp
 import requests
@@ -205,18 +205,18 @@ def get_recommendations():
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Recommendations failed: {str(e)}")
 
-
 @app.post("/download")
 def download_audio(request: DownloadRequest):
     """
-    Download audio using Piped API (for offline playback).
-    Fetches highest bitrate stream and sends as a downloadable file.
+    Progressive-download compatible endpoint.
+    Returns FULL audio file with Content-Length.
+    NO StreamingResponse (expo-file-system cannot use it).
     """
     try:
         url = request.url.strip()
         video_id = extract_video_id(url)
 
-        # Try multiple Piped instances
+        # Try Piped instances
         audio_url = None
         for instance in PIPED_INSTANCES:
             try:
@@ -230,7 +230,6 @@ def download_audio(request: DownloadRequest):
                 if not audio_streams:
                     continue
 
-                # Choose the best available audio stream
                 best_stream = sorted(audio_streams, key=lambda x: x.get("bitrate", 0))[-1]
                 audio_url = best_stream["url"]
                 break
@@ -238,39 +237,39 @@ def download_audio(request: DownloadRequest):
                 continue
 
         if not audio_url:
-            raise Exception("No audio streams found for download.")
+            raise Exception("No audio streams found.")
 
-        # Temporary file save
+        # Ensure folder exists
         os.makedirs("downloads", exist_ok=True)
-        filename = f"rhymes_{video_id}_{random.randint(1000, 9999)}.webm"
+
+        # filename
+        filename = f"rhymes_{video_id}_{random.randint(1000,9999)}.webm"
         filepath = os.path.join("downloads", filename)
 
-        # Stream download & save to temp folder
+        # Download FULL FILE to disk (not streamed to client)
         with requests.get(audio_url, stream=True) as r:
             r.raise_for_status()
             with open(filepath, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024 * 64):
+                for chunk in r.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
 
-        # Stream file back to user
-        def iterfile():
-            with open(filepath, "rb") as f:
-                yield from f
-            os.remove(filepath)  # Auto-delete after sending
+        # Get file size (required by expo-file-system!)
+        file_size = os.path.getsize(filepath)
 
-        return StreamingResponse(
-            iterfile(),
+        # Return FULL file
+        response = FileResponse(
+            filepath,
             media_type="audio/webm",
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"'
-            }
+            filename=filename
         )
+        response.headers["Content-Length"] = str(file_size)
+
+        return response
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Download failed: {str(e)}")
-
-
+    
 @app.get("/stream")
 def stream_audio(url: str):
     """
