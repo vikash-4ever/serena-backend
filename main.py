@@ -1,5 +1,4 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import yt_dlp
 import requests
@@ -8,333 +7,273 @@ import random
 import shutil
 import re
 from dotenv import load_dotenv
-from fastapi.middleware.cors import CORSMiddleware  
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# -------------------------
+# PIPED instances
+# -------------------------
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
     "https://pipedapi.in.projectsegfau.lt",
     "https://pipedapi.brighteon.wtf"
 ]
 
-# -------------------- COOKIES HANDLING --------------------
+# -------------------------
+# COOKIEFILE SUPPORT
+# -------------------------
 COOKIES_FILE = os.getenv("COOKIES_FILE")
-
 if COOKIES_FILE:
-    # On Render, /etc/secrets/cookies.txt is read-only → copy it
-    writable_path = os.path.join(BASE_DIR, "cookies.txt")
     try:
-        if not os.path.exists(writable_path):
-            shutil.copy(COOKIES_FILE, writable_path)
-        COOKIES_FILE = writable_path
-    except Exception as e:
-        print(f"Warning: failed to copy cookies file: {e}")
+        local = os.path.join(BASE_DIR, "cookies.txt")
+        if not os.path.exists(local):
+            shutil.copy(COOKIES_FILE, local)
+        COOKIES_FILE = local
+    except:
         COOKIES_FILE = None
 else:
-    # Local dev fallback
     COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
-# ----------------------------------------------------------
-
+# -------------------------
+# FASTAPI setup
+# -------------------------
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
-# Ensure downloads folder exists
-os.makedirs("downloads", exist_ok=True)
-
-
+# -------------------------
+# MODELS
+# -------------------------
 class SearchRequest(BaseModel):
     query: str
 
-class DownloadRequest(BaseModel):
+class ResolveRequest(BaseModel):
     url: str
 
-# ------------------------- HELPERS -------------------------
 
-def get_spotify_token():
-    auth_response = requests.post(
-        "https://accounts.spotify.com/api/token",
-        data={"grant_type": "client_credentials"},
-        auth=(CLIENT_ID, CLIENT_SECRET)
-    )
-    if auth_response.status_code != 200:
-        raise Exception("Failed to get Spotify token")
-    return auth_response.json().get("access_token")
+# -------------------------
+# HELPERS
+# -------------------------
+def extract_video_id(url: str) -> str:
+    pattern = r"(?:v=|youtu\.be/)([A-Za-z0-9_-]+)"
+    m = re.search(pattern, url)
+    if not m:
+        raise ValueError("Invalid YouTube URL")
+    return m.group(1)
 
-def get_spotify_metadata(track_url: str):
-    token = get_spotify_token()
-    track_id = track_url.split("/")[-1].split("?")[0]
-    headers = {"Authorization": f"Bearer {token}"}
-    response = requests.get(f"https://api.spotify.com/v1/tracks/{track_id}", headers=headers)
-    if response.status_code != 200:
-        raise Exception("Failed to fetch Spotify metadata")
-    data = response.json()
-    title = data["name"]
-    artist = data["artists"][0]["name"]
-    duration_sec = data["duration_ms"] // 1000
-    return {
-        "query": f"{title} {artist}",
-        "title": title,
-        "artist": artist,
-        "duration": duration_sec
-    }
 
+# -------------------------
+# YouTube Search
+# -------------------------
 def youtube_search(query: str, limit: int = 10):
-    """Search or fetch YouTube videos using cookies"""
     opts = {
         "quiet": True,
         "skip_download": True,
         "extract_flat": True,
         "noplaylist": True,
         "forcejson": True,
-        "cookiefile": COOKIES_FILE,   # <-- Added cookies support
     }
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        opts["cookiefile"] = COOKIES_FILE
+
     with yt_dlp.YoutubeDL(opts) as ydl:
         if "youtube.com" in query or "youtu.be" in query:
-            results = ydl.extract_info(query, download=False)
-            entries = [results]
+            info = ydl.extract_info(query, download=False)
+            entries = [info]
         else:
-            results = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
-            entries = results.get("entries", [results])
+            info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+            entries = info.get("entries", [info])
 
     songs = []
-    for entry in entries[:limit]:
-        video_id = entry.get("id")
-        thumbnail = entry.get("thumbnail") or (f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg" if video_id else "")
+    for e in entries[:limit]:
+        vid = e.get("id")
+        thumb = e.get("thumbnail") or (f"https://img.youtube.com/vi/{vid}/hqdefault.jpg" if vid else "")
         songs.append({
-            "title": entry.get("title") or "Unknown",
-            "artist": entry.get("uploader") or "Unknown Artist",
-            "thumbnail": thumbnail,
-            "url": f"https://www.youtube.com/watch?v={video_id}" if video_id else "",
+            "title": e.get("title") or "Unknown",
+            "artist": e.get("uploader") or "Unknown Artist",
+            "thumbnail": thumb,
+            "url": f"https://www.youtube.com/watch?v={vid}" if vid else "",
         })
     return songs
 
-def extract_video_id(url: str):
-    """Extracts video_id from a YouTube link"""
-    pattern = r"(?:v=|youtu\.be/)([A-Za-z0-9_-]+)"
-    match = re.search(pattern, url)
-    if not match:
-        raise Exception("Invalid YouTube URL")
-    return match.group(1)
 
-# ------------------------- ENDPOINTS -------------------------
+# -----------------------------------------------------
+# FAST RESOLVE CHAIN — SUPER OPTIMIZED (FASTEST VERSION)
+# -----------------------------------------------------
+def resolve_audio_url(video_id: str):
+    """
+    Multi-layer resolver:
+    1. Piped API (fast)
+    2. piped.video fallback (very fast)
+    3. youtubei unofficial API (fast)
+    4. yt-dlp fallback (slow)
+    """
 
-@app.post("/search")
-def search_song(request: SearchRequest):
-    """Search songs on YouTube but filter to actual music videos"""
+    # 1) Piped instances
+    for instance in PIPED_INSTANCES:
+        try:
+            api = f"{instance}/streams/{video_id}"
+            r = requests.get(api, timeout=3)
+            if r.status_code == 200:
+                data = r.json()
+                streams = data.get("audioStreams") or []
+                if streams:
+                    best = sorted(streams, key=lambda x: x.get("bitrate", 0))[-1]
+                    if best.get("url"):
+                        return best["url"]
+        except:
+            continue
+
+    # 2) piped.video universal fallback
     try:
-        query = request.query.strip()
-        is_youtube_link = "youtube.com" in query or "youtu.be" in query
+        api = f"https://piped.video/streams/{video_id}"
+        r = requests.get(api, timeout=3)
+        if r.status_code == 200:
+            data = r.json()
+            streams = data.get("audioStreams") or []
+            if streams:
+                best = sorted(streams, key=lambda x: x.get("bitrate", 0))[-1]
+                if best.get("url"):
+                    return best["url"]
+    except:
+        pass
 
-        if "spotify.com" in query:
-            meta = get_spotify_metadata(query)
-            raw_results = youtube_search(meta["query"], limit=15)
-        else:
-            raw_results = youtube_search(query, limit=15)
+    # 3) youtubei unofficial API
+    try:
+        api = f"https://yt-api.yashvardhan.info/api/v1/video?id={video_id}"
+        r = requests.get(api, timeout=3)
+        if r.status_code == 200:
+            info = r.json()
+            formats = info.get("adaptiveFormats") or []
+            audio_formats = [f for f in formats if "audio" in f.get("mimeType", "")]
+            if audio_formats:
+                best = sorted(audio_formats, key=lambda x: x.get("bitrate",0))[-1]
+                if best.get("url"):
+                    return best["url"]
+    except:
+        pass
 
-        # Only filter if it is not a direct YouTube link
-        if not is_youtube_link:
-            filtered_results = [
-                song for song in raw_results
-                if any(k in (song["title"] + " " + song["artist"]).lower()
-                       for k in ["music", "song", "audio", "track"])
+    # 4) Final fallback — yt-dlp
+    try:
+        opts = {
+            "quiet": True,
+            "format": "bestaudio/best",
+        }
+        if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+            opts["cookiefile"] = COOKIES_FILE
+
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            if "url" in info:
+                return info["url"]
+
+            fmts = info.get("formats") or []
+            audio_fmts = [f for f in fmts if f.get("url")]
+            if audio_fmts:
+                best = sorted(audio_fmts, key=lambda x: x.get("abr") or x.get("tbr") or 0)[-1]
+                return best["url"]
+    except:
+        pass
+
+    raise RuntimeError("No audio URL found after all resolvers")
+
+
+# -----------------------------------------------------
+# SEARCH / POPULAR / RECOMMENDATIONS
+# -----------------------------------------------------
+@app.post("/search")
+def search_song(req: SearchRequest):
+    try:
+        q = req.query.strip()
+        is_youtube = "youtube.com" in q or "youtu.be" in q
+        raw = youtube_search(q, limit=15)
+
+        if not is_youtube:
+            filtered = [
+                s for s in raw
+                if any(k in (s["title"] + " " + s["artist"]).lower()
+                       for k in ["music","song","audio","track"])
             ]
         else:
-            filtered_results = raw_results
+            filtered = raw
 
-        return {"status": "success", "results": filtered_results[:15]}
+        return {"status": "success", "results": filtered[:15]}
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Search failed: {str(e)}")
-
+        raise HTTPException(400, f"Search failed: {e}")
 
 
 @app.get("/popular")
 def get_popular():
-    """Fetch trending / popular songs, biased toward Bollywood/Indian music"""
     try:
-        trending_queries = [
+        queries = [
             "Bollywood top hits 2025", "Indian music chart", "Bollywood songs playlist",
             "Top Hindi songs 2025", "Popular Indian tracks"
         ]
-        query = random.choice(trending_queries)
-        raw_results = youtube_search(query, limit=15)
-
-        # Filter results to likely music videos
-        filtered_results = [
-            song for song in raw_results
-            if any(k in (song["title"] + " " + song["artist"]).lower() for k in ["music", "song", "audio", "track", "bollywood", "hindi"])
+        q = random.choice(queries)
+        raw = youtube_search(q, limit=15)
+        filtered = [
+            s for s in raw
+            if any(k in (s["title"] + " " + s["artist"]).lower()
+                   for k in ["music","song","audio","track","bollywood","hindi"])
         ]
-        return {"status": "success", "results": filtered_results[:15]}
-
+        return {"status": "success", "results": filtered[:15]}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Popular fetch failed: {str(e)}")
+        raise HTTPException(400, f"Popular failed: {e}")
 
 
 @app.get("/recommendations")
 def get_recommendations():
-    """Provide music recommendations, biased toward relaxing / Bollywood / Indian songs"""
     try:
-        base_queries = [
+        base = [
             "Bollywood romantic songs", "Relaxing Hindi music", "Indian pop hits",
             "Bollywood trending songs", "Acoustic Hindi covers", "Top Hindi tracks"
         ]
-        query = random.choice(base_queries)
-        raw_results = youtube_search(query, limit=12)
-
-        # Filter results to likely music videos
-        filtered_results = [
-            song for song in raw_results
-            if any(k in (song["title"] + " " + song["artist"]).lower() for k in ["music", "song", "audio", "track", "bollywood", "hindi"])
+        q = random.choice(base)
+        raw = youtube_search(q, limit=12)
+        filtered = [
+            s for s in raw
+            if any(k in (s["title"] + " " + s["artist"]).lower()
+                   for k in ["music","song","audio","track","bollywood","hindi"])
         ]
-        return {"status": "success", "query": query, "results": filtered_results[:12]}
-
+        return {"status": "success", "query": q, "results": filtered[:12]}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Recommendations failed: {str(e)}")
+        raise HTTPException(400, f"Recommendations failed: {e}")
 
 
-@app.post("/download")
-def download_audio(request: DownloadRequest):
-    """
-    Download audio using Piped API (for offline playback).
-    Fetches highest bitrate stream and sends as a downloadable file.
-    """
+# -----------------------------------------------------
+# NEW: /resolve — only returns DIRECT AUDIO STREAM URL
+# -----------------------------------------------------
+@app.post("/resolve")
+def resolve_audio(req: ResolveRequest):
     try:
-        url = request.url.strip()
-        video_id = extract_video_id(url)
-
-        # Try multiple Piped instances
-        audio_url = None
-        for instance in PIPED_INSTANCES:
-            try:
-                api_url = f"{instance}/streams/{video_id}"
-                r = requests.get(api_url, timeout=10)
-                if r.status_code != 200:
-                    continue
-
-                data = r.json()
-                audio_streams = data.get("audioStreams", [])
-                if not audio_streams:
-                    continue
-
-                # Choose the best available audio stream
-                best_stream = sorted(audio_streams, key=lambda x: x.get("bitrate", 0))[-1]
-                audio_url = best_stream["url"]
-                break
-            except:
-                continue
-
-        if not audio_url:
-            raise Exception("No audio streams found for download.")
-
-        # Temporary file save
-        os.makedirs("downloads", exist_ok=True)
-        filename = f"rhymes_{video_id}_{random.randint(1000, 9999)}.webm"
-        filepath = os.path.join("downloads", filename)
-
-        # Stream download & save to temp folder
-        with requests.get(audio_url, stream=True) as r:
-            r.raise_for_status()
-            with open(filepath, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024 * 64):
-                    if chunk:
-                        f.write(chunk)
-
-        # Stream file back to user
-        def iterfile():
-            with open(filepath, "rb") as f:
-                yield from f
-            os.remove(filepath)  # Auto-delete after sending
-
-        return StreamingResponse(
-            iterfile(),
-            media_type="audio/webm",
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"'
-            }
-        )
-
+        vid = extract_video_id(req.url.strip())
+        audio_url = resolve_audio_url(vid)
+        return {"status": "success", "audio_url": audio_url}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Download failed: {str(e)}")
+        raise HTTPException(400, f"Resolve failed: {e}")
 
 
-@app.get("/stream")
-def stream_audio(url: str):
-    """
-    Streams audio using Piped API (stable, no YouTube restrictions)
-    """
-    try:
-        video_id = extract_video_id(url)
-
-        audio_url = None
-
-        # Try multiple Piped instances to avoid downtime
-        for instance in PIPED_INSTANCES:
-            try:
-                api_url = f"{instance}/streams/{video_id}"
-                r = requests.get(api_url, timeout=10)
-                
-                if r.status_code != 200:
-                    continue
-                
-                data = r.json()
-                audio_streams = data.get("audioStreams", [])
-
-                if not audio_streams:
-                    continue
-
-                # Choose highest quality audio
-                best_stream = sorted(audio_streams, key=lambda x: x.get("bitrate", 0))[-1]
-                audio_url = best_stream["url"]
-                break
-            except:
-                continue
-
-        if not audio_url:
-            raise Exception("No audio streams available from any Piped instance.")
-
-        def iterfile():
-            with requests.get(audio_url, stream=True) as r:
-                r.raise_for_status()
-                for chunk in r.iter_content(1024 * 64):
-                    yield chunk
-
-        return StreamingResponse(iterfile(), media_type="audio/webm")
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Streaming failed: {str(e)}")
-
-
-# -------------------- PING SERVER KEEP-ALIVE --------------------
-import threading
-import time
-
-# ✅ Load from .env or Render environment variables
+# -----------------------------------------------------
+# KEEP ALIVE (Render)
+# -----------------------------------------------------
+import threading, time
 PING_URL = os.getenv("PING_URL", "http://localhost:8000")
 
-def keep_server_awake():
-    """Ping the server every 14 minutes to prevent Render free tier sleep."""
+def keep_awake():
     while True:
         try:
-            print("[PING] Sending keep-alive ping...")
-            response = requests.get(f"{PING_URL}/recommendations", timeout=10)
-            print(f"[PING] Status: {response.status_code}")
-        except Exception as e:
-            print(f"[PING] Failed: {e}")
-        time.sleep(14 * 60)  # wait 14 minutes
+            requests.get(f"{PING_URL}/resolve?url=https://youtu.be/dQw4w9WgXcQ", timeout=5)
+        except:
+            pass
+        time.sleep(14 * 60)
 
-# Start background thread
-threading.Thread(target=keep_server_awake, daemon=True).start()
+threading.Thread(target=keep_awake, daemon=True).start()
