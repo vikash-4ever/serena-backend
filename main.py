@@ -126,7 +126,15 @@ def resolve_audio_url(video_id: str):
                 data = r.json()
                 streams = data.get("audioStreams") or []
                 if streams:
-                    best = sorted(streams, key=lambda x: x.get("bitrate", 0))[-1]
+                    filtered = [
+                        s for s in streams
+                        if s.get("bitrate") and s.get("bitrate") <= 128000
+                    ]
+
+                    if not filtered:
+                        filtered = streams  # fallback if low bitrate not found
+
+                    best = sorted(filtered, key=lambda x: x.get("bitrate", 0))[-1]
                     if best.get("url"):
                         return best["url"]
         except:
@@ -140,7 +148,15 @@ def resolve_audio_url(video_id: str):
             data = r.json()
             streams = data.get("audioStreams") or []
             if streams:
-                best = sorted(streams, key=lambda x: x.get("bitrate", 0))[-1]
+                filtered = [
+                    s for s in streams
+                    if s.get("bitrate") and s.get("bitrate") <= 128000
+                ]
+
+                if not filtered:
+                    filtered = streams  # fallback if low bitrate not found
+
+                best = sorted(filtered, key=lambda x: x.get("bitrate", 0))[-1]
                 if best.get("url"):
                     return best["url"]
     except:
@@ -155,7 +171,15 @@ def resolve_audio_url(video_id: str):
             formats = info.get("adaptiveFormats") or []
             audio_formats = [f for f in formats if "audio" in f.get("mimeType", "")]
             if audio_formats:
-                best = sorted(audio_formats, key=lambda x: x.get("bitrate",0))[-1]
+                filtered = [
+                    f for f in audio_formats
+                    if f.get("bitrate") and f.get("bitrate") <= 128000
+                ]
+
+                if not filtered:
+                    filtered = audio_formats
+
+                best = sorted(filtered, key=lambda x: x.get("bitrate", 0))[-1]
                 if best.get("url"):
                     return best["url"]
     except:
