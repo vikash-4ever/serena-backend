@@ -238,18 +238,47 @@ def search_song(req: SearchRequest):
 @app.get("/popular")
 def get_popular():
     try:
-        queries = [
-            "Bollywood top hits 2025", "Indian music chart", "Bollywood songs playlist",
-            "Top Hindi songs 2025", "Popular Indian tracks"
+        q = "trending bollywood songs"
+
+        raw = youtube_search(q, limit=50)
+
+        BLOCK_WORDS = [
+            "dialogue", "scene", "trailer", "teaser",
+            "promo", "making", "interview",
+            "full movie", "clip", "conversation"
         ]
-        q = random.choice(queries)
-        raw = youtube_search(q, limit=15)
-        filtered = [
-            s for s in raw
-            if any(k in (s["title"] + " " + s["artist"]).lower()
-                   for k in ["music","song","audio","track","bollywood","hindi"])
+        BLOCK_WORDS = [
+            "jukebox", "playlist", "audio jukebox", "video jukebox",
+            "full movie", "movie scene", "dialogue", "conversation",
+            "interview", "promo", "teaser", "trailer",
+            "making", "behind the scenes", "clip"
         ]
-        return {"status": "success", "results": filtered[:15]}
+
+        filtered = []
+        for s in raw:
+            title = s["title"].lower()
+            artist = s["artist"].lower()
+
+            # block non-song content
+            if any(b in title for b in BLOCK_WORDS):
+                continue
+
+            # duration filter (real songs)
+            duration = s.get("duration", 0)
+            if duration and (duration < 90 or duration > 420):
+                continue
+
+            # artist sanity check
+            if not any(k in artist for k in ["music", "records", "official"]):
+                continue
+
+            filtered.append(s)
+
+        return {
+            "status": "success",
+            "results": filtered[:15]
+        }
+
     except Exception as e:
         raise HTTPException(400, f"Popular failed: {e}")
 
