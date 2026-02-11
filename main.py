@@ -121,7 +121,8 @@ def resolve_audio_url(video_id: str):
     for instance in PIPED_INSTANCES:
         try:
             api = f"{instance}/streams/{video_id}"
-            r = requests.get(api, timeout=3)
+            headers = {"User-Agent":"Mozilla/5.0"}
+            r = requests.get(api, headers=headers, timeout=3)
             if r.status_code == 200:
                 data = r.json()
                 streams = data.get("audioStreams") or []
@@ -143,7 +144,8 @@ def resolve_audio_url(video_id: str):
     # 2) piped.video universal fallback
     try:
         api = f"https://piped.video/streams/{video_id}"
-        r = requests.get(api, timeout=3)
+        headers = {"User-Agent":"Mozilla/5.0"}
+        r = requests.get(api,headers=headers, timeout=3)
         if r.status_code == 200:
             data = r.json()
             streams = data.get("audioStreams") or []
@@ -165,7 +167,8 @@ def resolve_audio_url(video_id: str):
     # 3) youtubei unofficial API
     try:
         api = f"https://yt-api.yashvardhan.info/api/v1/video?id={video_id}"
-        r = requests.get(api, timeout=3)
+        headers = {"User-Agent":"Mozilla/5.0"}
+        r = requests.get(api,headers=headers, timeout=3)
         if r.status_code == 200:
             info = r.json()
             formats = info.get("adaptiveFormats") or []
@@ -324,7 +327,11 @@ PING_URL = os.getenv("PING_URL", "http://localhost:8000")
 def keep_awake():
     while True:
         try:
-            requests.get(f"{PING_URL}/resolve?url=https://youtu.be/dQw4w9WgXcQ", timeout=5)
+            requests.post(
+                f"{PING_URL}/resolve",
+                json={"url":"https://youtu.be/dQw4w9WgXcQ"},
+                timeout=5
+            )
         except:
             pass
         time.sleep(14 * 60)
