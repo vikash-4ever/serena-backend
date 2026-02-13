@@ -8,8 +8,6 @@ import re
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(docs_url="/docs")
-
 load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -119,10 +117,14 @@ def resolve_audio_url(video_id: str):
         # cloud safe formats
         "format": "251/250/249/bestaudio",
 
+        "http_headers": {
+            "User-Agent": "com.google.android.youtube/17.31.35 (Linux; U; Android 11)"
+        },
+
         # VERY IMPORTANT — android client works best on Render
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "web"]
+                "player_client": ["android"]
             }
         },
 
@@ -175,13 +177,20 @@ def search_song(req: SearchRequest):
         raw = youtube_search(q, limit=15)
 
         if not is_youtube:
-            filtered = [
-                s for s in raw
+            filtered = []
+            for s in raw:
+                title = s["title"].lower()
+
+                # 🚫 jukebox hatao (important)
+                if "jukebox" in title:
+                    continue
+
                 if any(k in (s["title"] + " " + s["artist"]).lower()
-                       for k in ["music","song","audio","track"])
-            ]
+                    for k in ["music","song","audio","track"]):
+                    filtered.append(s)
         else:
             filtered = raw
+
 
         return {"status": "success", "results": filtered[:15]}
 
