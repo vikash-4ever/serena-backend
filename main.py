@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import yt_dlp
+import requests
 import os
 import random
 import shutil
@@ -12,6 +13,14 @@ load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# -------------------------
+# PIPED instances
+# -------------------------
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.in.projectsegfau.lt",
+    "https://pipedapi.brighteon.wtf"
+]
 
 # -------------------------
 # COOKIEFILE SUPPORT
@@ -71,11 +80,6 @@ def youtube_search(query: str, limit: int = 10):
         "extract_flat": True,
         "noplaylist": True,
         "forcejson": True,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "web"]
-            }
-        },
     }
     if COOKIES_FILE and os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
@@ -100,70 +104,110 @@ def youtube_search(query: str, limit: int = 10):
         })
     return songs
 
+
 # -----------------------------------------------------
-# RENDER-SAFE FAST RESOLVER (NO PIPED / NO UNOFFICIAL APIs)
+# FAST RESOLVE CHAIN — SUPER OPTIMIZED (FASTEST VERSION)
 # -----------------------------------------------------
 def resolve_audio_url(video_id: str):
+    """
+    Multi-layer resolver:
+    1. Piped API (fast)
+    2. piped.video fallback (very fast)
+    3. youtubei unofficial API (fast)
+    4. yt-dlp fallback (slow)
+    """
 
-    url = f"https://www.youtube.com/watch?v={video_id}"
+    # 1) Piped instances
+    for instance in PIPED_INSTANCES:
+        try:
+            api = f"{instance}/streams/{video_id}"
+            r = requests.get(api, timeout=3)
+            if r.status_code == 200:
+                data = r.json()
+                streams = data.get("audioStreams") or []
+                if streams:
+                    filtered = [
+                        s for s in streams
+                        if s.get("bitrate") and s.get("bitrate") <= 128000
+                    ]
 
-    opts = {
-        "quiet": True,
-        "skip_download": True,
-        "nocheckcertificate": True,
-        "geo_bypass": True,
-        "noplaylist": True,
+                    if not filtered:
+                        filtered = streams  # fallback if low bitrate not found
 
-        # cloud safe formats
-        "format": "251/250/249/bestaudio",
+                    best = sorted(filtered, key=lambda x: x.get("bitrate", 0))[-1]
+                    if best.get("url"):
+                        return best["url"]
+        except:
+            continue
 
-        "http_headers": {
-            "User-Agent": "com.google.android.youtube/17.31.35 (Linux; U; Android 11)"
-        },
-
-        # VERY IMPORTANT — android client works best on Render
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android"]
-            }
-        },
-
-        # make extraction faster
-        "concurrent_fragment_downloads": 3,
-        "retries": 2,
-    }
-
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        opts["cookiefile"] = COOKIES_FILE
-
+    # 2) piped.video universal fallback
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        api = f"https://piped.video/streams/{video_id}"
+        r = requests.get(api, timeout=3)
+        if r.status_code == 200:
+            data = r.json()
+            streams = data.get("audioStreams") or []
+            if streams:
+                filtered = [
+                    s for s in streams
+                    if s.get("bitrate") and s.get("bitrate") <= 128000
+                ]
 
-            # direct audio url (fast path)
-            if info.get("url"):
+                if not filtered:
+                    filtered = streams  # fallback if low bitrate not found
+
+                best = sorted(filtered, key=lambda x: x.get("bitrate", 0))[-1]
+                if best.get("url"):
+                    return best["url"]
+    except:
+        pass
+
+    # 3) youtubei unofficial API
+    try:
+        api = f"https://yt-api.yashvardhan.info/api/v1/video?id={video_id}"
+        r = requests.get(api, timeout=3)
+        if r.status_code == 200:
+            info = r.json()
+            formats = info.get("adaptiveFormats") or []
+            audio_formats = [f for f in formats if "audio" in f.get("mimeType", "")]
+            if audio_formats:
+                filtered = [
+                    f for f in audio_formats
+                    if f.get("bitrate") and f.get("bitrate") <= 128000
+                ]
+
+                if not filtered:
+                    filtered = audio_formats
+
+                best = sorted(filtered, key=lambda x: x.get("bitrate", 0))[-1]
+                if best.get("url"):
+                    return best["url"]
+    except:
+        pass
+
+    # 4) Final fallback — yt-dlp
+    try:
+        opts = {
+            "quiet": True,
+            "format": "bestaudio/best",
+        }
+        if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+            opts["cookiefile"] = COOKIES_FILE
+
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            if "url" in info:
                 return info["url"]
 
-            # fallback search in formats
             fmts = info.get("formats") or []
-            audio = [
-                f for f in fmts
-                if f.get("url") and f.get("acodec") != "none"
-            ]
+            audio_fmts = [f for f in fmts if f.get("url")]
+            if audio_fmts:
+                best = sorted(audio_fmts, key=lambda x: x.get("abr") or x.get("tbr") or 0)[-1]
+                return best["url"]
+    except:
+        pass
 
-            if not audio:
-                raise RuntimeError("No audio formats")
-
-            best = sorted(
-                audio,
-                key=lambda x: x.get("abr") or x.get("tbr") or 0
-            )[-1]
-
-            return best["url"]
-
-    except Exception as e:
-        print("RESOLVE ERROR:", e)
-        raise RuntimeError("Audio resolve failed")
+    raise RuntimeError("No audio URL found after all resolvers")
 
 
 # -----------------------------------------------------
@@ -177,20 +221,13 @@ def search_song(req: SearchRequest):
         raw = youtube_search(q, limit=15)
 
         if not is_youtube:
-            filtered = []
-            for s in raw:
-                title = s["title"].lower()
-
-                # 🚫 jukebox hatao (important)
-                if "jukebox" in title:
-                    continue
-
+            filtered = [
+                s for s in raw
                 if any(k in (s["title"] + " " + s["artist"]).lower()
-                    for k in ["music","song","audio","track"]):
-                    filtered.append(s)
+                       for k in ["music","song","audio","track"])
+            ]
         else:
             filtered = raw
-
 
         return {"status": "success", "results": filtered[:15]}
 
@@ -281,8 +318,15 @@ def resolve_audio(req: ResolveRequest):
 # -----------------------------------------------------
 # KEEP ALIVE (Render)
 # -----------------------------------------------------
-PING_URL = os.getenv("PING_URL")
+import threading, time
+PING_URL = os.getenv("PING_URL", "http://localhost:8000")
 
-@app.get("/")
-def health():
-    return {"status": "ok"}
+def keep_awake():
+    while True:
+        try:
+            requests.get(f"{PING_URL}/resolve?url=https://youtu.be/dQw4w9WgXcQ", timeout=5)
+        except:
+            pass
+        time.sleep(14 * 60)
+
+threading.Thread(target=keep_awake, daemon=True).start()
